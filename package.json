@@ -1,0 +1,14 @@
+{
+    "name": "momo-render-bridge",
+    "version": "1.0.0",
+    "description": "Node bridge to forward MoMo webhook to InfinityFree",
+    "main": "server.js",
+    "scripts": {
+        "start": "node server.js"
+    },
+    "dependencies": {
+        "express": "^4.18.2",
+        "axios": "^1.6.0",
+        "body-parser": "^1.20.2"
+    }
+}
