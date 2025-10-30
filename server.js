@@ -71,8 +71,17 @@ app.get("/", (req, res) => {
     </p>
   `);
 });
+// 🔎 TEST KẾT NỐI InfinityFree
+import https from "https";
+
+https.get("https://techstore16.kesug.com/Web/api/order/ipn_bridge.php", (res) => {
+  console.log("🔎 InfinityFree test status:", res.statusCode);
+}).on("error", (err) => {
+  console.error("🚫 InfinityFree connection failed:", err.message);
+});
 
 // 🚀 Khởi động server
 app.listen(PORT, () => {
   console.log(`🚀 MoMo Render Bridge đang chạy tại port ${PORT}`);
 });
+
