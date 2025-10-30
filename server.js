@@ -11,7 +11,7 @@ app.use(bodyParser.json());
 // 🌐 URL webhook InfinityFree (điểm nhận dữ liệu MoMo)
 const INFINITYFREE_IPN =
   process.env.INFINITYFREE_IPN ||
-  "https://techstore16.kesug.com/Web/api/order/ipn_bridge.php";
+  "https://techstore16.kesug.com/Web/api/order/save_momo_order.php";
 
 /*
 |--------------------------------------------------------------------------
@@ -77,3 +77,4 @@ app.get("/", (req, res) => {
 app.listen(PORT, () => {
   console.log(`🚀 MoMo Render Bridge đang chạy tại port ${PORT}`);
 });
+
