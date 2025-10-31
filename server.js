@@ -1,99 +1,114 @@
 import express from "express";
 import axios from "axios";
 import bodyParser from "body-parser";
+import mysql from "mysql2/promise";
 import fs from "fs";
 import path from "path";
 
 const app = express();
 const PORT = process.env.PORT || 10000;
-
-// 🧩 Middleware
 app.use(bodyParser.json());
-app.use(bodyParser.urlencoded({ extended: false }));
 
-// 🌐 URL webhook InfinityFree
-const INFINITYFREE_IPN = "https://techstore16.kesug.com/Web/api/order/ipn_bridge.php";
+// 🧩 Thông tin DB InfinityFree
+const DB_CONFIG = {
+  host: "sql204.infinityfree.com",
+  user: "if0_40213383",
+  password: "A3mukVTmOc2r",
+  database: "if0_40213383_phone_store",
+  port: 3306,
+};
 
-// 📂 Log file để debug (Render có thể xem qua "Logs" tab)
+// 📂 Log file Render
 const LOG_FILE = path.resolve("./momo_render_log.txt");
-
-// 🧰 Hàm ghi log an toàn
-function logToFile(message) {
-  const line = `[${new Date().toISOString()}] ${message}\n`;
+function log(msg) {
+  const line = `[${new Date().toISOString()}] ${msg}\n`;
   fs.appendFileSync(LOG_FILE, line);
-  console.log(message);
+  console.log(msg);
 }
 
 /*
 |--------------------------------------------------------------------------
-| Route: /webhook_momo (callback từ MoMo)
+| Route: /webhook_momo — MoMo Sandbox callback
 |--------------------------------------------------------------------------
 */
 app.post("/webhook_momo", async (req, res) => {
-  try {
-    const momoData = req.body;
+  const data = req.body;
+  log("📩 MoMo callback received:\n" + JSON.stringify(data, null, 2));
 
-    logToFile("📩 [CALLBACK] Dữ liệu nhận từ MoMo:");
-    logToFile(JSON.stringify(momoData, null, 2));
-
-    if (!momoData || !momoData.orderId) {
-      logToFile("⚠️ Thiếu orderId trong payload!");
-      return res.status(400).json({ resultCode: 98, message: "Thiếu orderId" });
-    }
-
-    // 📨 Forward sang InfinityFree
-    try {
-      const response = await axios.post(INFINITYFREE_IPN, momoData, {
-        headers: { "Content-Type": "application/json" },
-        timeout: 10000,
-      });
-
-      logToFile(
-        `✅ Đã forward orderId=${momoData.orderId} → InfinityFree [${response.status}]`
-      );
-      logToFile("📦 Phản hồi từ InfinityFree:");
-      logToFile(JSON.stringify(response.data, null, 2));
-
-      // ✅ Phản hồi lại cho MoMo
-      return res.json({ resultCode: 0, message: "Forward success" });
-    } catch (err) {
-      logToFile(`❌ Lỗi khi gửi tới InfinityFree: ${err.message}`);
-      return res
-        .status(502)
-        .json({ resultCode: 99, message: "Forward failed", error: err.message });
-    }
-  } catch (err) {
-    logToFile(`💥 Lỗi nội bộ webhook: ${err.message}`);
-    return res.status(500).json({ resultCode: 500, message: "Internal error" });
+  // ✅ Kiểm tra hợp lệ
+  if (!data.orderId || data.resultCode !== 0) {
+    log("⚠️ Invalid or failed payment.");
+    return res.json({ resultCode: 99, message: "Invalid payload or failed payment" });
   }
-});
-
-/*
-|--------------------------------------------------------------------------
-| Route: /test (giả lập request MoMo)
-|--------------------------------------------------------------------------
-| Dùng để bạn test thử mà không cần thanh toán thật
-| Gửi JSON mẫu để xem log và xác nhận InfinityFree nhận được.
-*/
-app.get("/test", async (req, res) => {
-  const sample = {
-    partnerCode: "MOMO3Z3T20251027_TEST",
-    orderId: "TEST_" + Date.now(),
-    amount: 2000,
-    resultCode: 0,
-    message: "Thanh toán thành công (TEST)",
-  };
 
   try {
-    const response = await axios.post(INFINITYFREE_IPN, sample, {
-      headers: { "Content-Type": "application/json" },
-    });
-    logToFile("🧪 [TEST] Gửi thử tới InfinityFree thành công!");
-    logToFile(JSON.stringify(response.data, null, 2));
-    res.send("<h3>✅ Test gửi dữ liệu mẫu tới InfinityFree thành công!</h3>");
+    // 📦 Lấy userId từ extraData
+    let userId = 0;
+    if (data.extraData) {
+      const parts = data.extraData.split("=");
+      if (parts[0] === "uid") userId = parseInt(parts[1]);
+    }
+    if (!userId) {
+      log("⚠️ Missing userId in extraData");
+      return res.json({ resultCode: 98, message: "Missing userId" });
+    }
+
+    // 🧠 Kết nối database InfinityFree
+    const conn = await mysql.createConnection(DB_CONFIG);
+    log("🔌 Connected to InfinityFree DB.");
+
+    // 🔍 Tránh xử lý trùng
+    const [exists] = await conn.execute(
+      "SELECT 1 FROM orders WHERE momo_transaction_id = ?",
+      [data.orderId]
+    );
+    if (exists.length > 0) {
+      log(`⚠️ Duplicate callback for ${data.orderId}`);
+      await conn.end();
+      return res.json({ resultCode: 0, message: "Already processed" });
+    }
+
+    // 🛒 Lấy giỏ hàng người dùng
+    const [cartItems] = await conn.execute(
+      `SELECT c.product_id, c.quantity, p.price 
+       FROM cart c JOIN products p ON c.product_id = p.id 
+       WHERE c.user_id = ?`,
+      [userId]
+    );
+
+    if (cartItems.length === 0) {
+      log(`⚠️ Cart empty for user #${userId}`);
+      await conn.end();
+      return res.json({ resultCode: 1000, message: "Empty cart" });
+    }
+
+    // 🧾 Tạo đơn hàng
+    const [orderResult] = await conn.execute(
+      `INSERT INTO orders (user_id, total_amount, status, payment_method, momo_transaction_id, payment_status, payment_time)
+       VALUES (?, ?, 'Đã thanh toán - MoMo', 'MoMo', ?, 'paid', NOW())`,
+      [userId, data.amount, data.orderId]
+    );
+    const orderId = orderResult.insertId;
+    log(`✅ Created order #${orderId} for user #${userId}`);
+
+    // 💾 Thêm chi tiết đơn hàng
+    for (const item of cartItems) {
+      await conn.execute(
+        `INSERT INTO order_details (order_id, product_id, quantity, price, payment_status)
+         VALUES (?, ?, ?, ?, 'paid')`,
+        [orderId, item.product_id, item.quantity, item.price]
+      );
+    }
+
+    // 🧹 Xóa giỏ hàng
+    await conn.execute(`DELETE FROM cart WHERE user_id = ?`, [userId]);
+
+    await conn.end();
+    log(`🧾 Order #${orderId} processed successfully.`);
+    return res.json({ resultCode: 0, message: "Confirm Success" });
   } catch (err) {
-    logToFile("❌ [TEST] Gửi thất bại: " + err.message);
-    res.send("<h3 style='color:red'>❌ Test thất bại: " + err.message + "</h3>");
+    log("❌ Database error: " + err.message);
+    return res.json({ resultCode: 500, message: "DB Error" });
   }
 });
 
@@ -105,18 +120,12 @@ app.get("/test", async (req, res) => {
 app.get("/", (req, res) => {
   res.send(`
     <h2>✅ MoMo Render Bridge đang hoạt động!</h2>
-    <p>Server đang chạy tại cổng: <b>${PORT}</b></p>
-    <p>Forward webhook đến: <a href="${INFINITYFREE_IPN}" target="_blank">${INFINITYFREE_IPN}</a></p>
-    <p>📄 <a href="/test" target="_blank">/test</a> – gửi thử dữ liệu mẫu đến InfinityFree</p>
+    <p>Server chạy tại cổng: <b>${PORT}</b></p>
+    <p>Webhook này ghi trực tiếp vào DB InfinityFree.</p>
   `);
 });
 
-/*
-|--------------------------------------------------------------------------
-| Khởi động server
-|--------------------------------------------------------------------------
-*/
 app.listen(PORT, () => {
   console.log(`🚀 MoMo Render Bridge đang chạy tại port ${PORT}`);
-  logToFile(`🚀 Server khởi động tại cổng ${PORT}`);
+  log("🚀 Server started on Render");
 });
